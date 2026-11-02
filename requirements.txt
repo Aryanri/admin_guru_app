@@ -1,6 +1,6 @@
 Flask
-psycopg2-binary
-SQLAlchemy
 pandas
 openpyxl
 python-docx
+psycopg2-binary
+SQLAlchemy
