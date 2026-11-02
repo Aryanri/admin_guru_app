@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <title>Dashboard - SIM Admin Guru</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding-top: 70px; }
+    </style>
+</head>
+<body class="bg-light">
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark fixed-top shadow">
+    <div class="container-fluid">
+        <a class="navbar-brand fw-bold" href="#">SIM Admin Guru</a>
+        <div class="navbar-nav ms-auto">
+            <a class="nav-link active" href="/dashboard">Dashboard</a>
+            <a class="nav-link" href="/generator">Generator AI</a>
+            <a class="nav-link" href="/arsip">Arsip & Cache</a>
+            <a class="nav-link" href="/pengaturan">Pengaturan</a>
+            <a class="nav-link text-danger fw-bold" href="/logout">Keluar</a>
+        </div>
+    </div>
+</nav>
+
+<div class="container my-4">
+    <div class="row">
+        <div class="col-md-12 mb-4">
+            <div class="card p-4 shadow-sm bg-primary text-white">
+                <h2>Selamat Datang, {{ session.nama_lengkap }}!</h2>
+                <p class="mb-0">Role: <span class="badge bg-light text-dark">{{ session.role }}</span> | Mata Pelajaran: {{ session.mapel }} | NIP: {{ session.nip }}</p>
+            </div>
+        </div>
+    </div>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="row">
+        <div class="col-md-6 mb-4">
+            <div class="card p-4 shadow-sm h-100">
+                <h4 class="mb-3 text-primary">Profil Sekolah & Dokumen</h4>
+                <form method="POST" action="/update-sekolah" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label class="form-label">Nama Sekolah</label>
+                        <input type="text" name="nama_sekolah" class="form-control" value="{{ sekolah.nama_sekolah }}" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Alamat Sekolah</label>
+                        <textarea name="alamat" class="form-control" rows="2" required>{{ sekolah.alamat }}</textarea>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Nama Kepala Sekolah</label>
+                            <input type="text" name="nama_kepsek" class="form-control" value="{{ sekolah.nama_kepsek }}" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">NIP Kepala Sekolah</label>
+                            <input type="text" name="nip_kepsek" class="form-control" value="{{ sekolah.nip_kepsek }}" required>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Nama Guru (Otomatis dari Akun Login)</label>
+                            <input type="text" class="form-control bg-light" value="{{ current_user.nama_lengkap }}" readonly>
+                            <small class="text-muted">Diambil dari akun yang sedang login (tidak dapat dirubah).</small>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">NIP Guru (Otomatis dari Akun Login)</label>
+                            <input type="text" class="form-control bg-light" value="{{ current_user.nip }}" readonly>
+                            <small class="text-muted">Diambil dari akun yang sedang login (tidak dapat dirubah).</small>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Kop Surat / Logo Sekolah (Gambar)</label>
+                        <input type="file" name="kop_surat" class="form-control">
+                        {% if sekolah.kop_surat %}
+                        <small class="text-muted">File saat ini: {{ sekolah.kop_surat }}</small>
+                        {% endif %}
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">Simpan Profil Sekolah</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="col-md-6 mb-4">
+            <div class="card p-4 shadow-sm h-100">
+                <h4 class="mb-3 text-dark">Log Aktivitas Terbaru Anda</h4>
+                {% if logs %}
+                <ul class="list-group">
+                    {% for l in logs %}
+                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                        <span>{{ l.aktivitas }}</span>
+                        <small class="text-muted">{{ l.timestamp }}</small>
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% else %}
+                <p class="text-muted">Belum ada aktivitas tercatat.</p>
+                {% endif %}
+
+                <hr class="my-4">
+                <h5 class="text-success">Cepat Akses</h5>
+                <div class="d-grid gap-2">
+                    <a href="/generator" class="btn btn-outline-primary">Buka Generator Modul & Analisis HEM</a>
+                    <a href="/arsip" class="btn btn-outline-secondary">Lihat Arsip & Cache Dokumen</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

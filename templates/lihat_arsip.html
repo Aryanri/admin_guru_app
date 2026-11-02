@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <title>Preview & Siap Cetak Dokumen - SIM Admin Guru</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding-top: 70px; background: #525659; }
+        .document-page {
+            background: white;
+            width: 210mm;
+            min-height: 297mm;
+            margin: 20px auto;
+            padding: 20mm;
+            box-shadow: 0 0 10px rgba(0,0,0,0.3);
+        }
+        @media print {
+            body { background: white; padding-top: 0; }
+            .no-print { display: none !important; }
+            .document-page { margin: 0; box-shadow: none; width: 100%; padding: 10mm; }
+        }
+    </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark fixed-top shadow no-print">
+    <div class="container-fluid">
+        <a class="navbar-brand fw-bold" href="#">Preview Dokumen Arsip</a>
+        <div class="navbar-nav ms-auto align-items-center">
+            {% if not preview_data and not 'HEM' in item.jenis_modul %}
+            <a href="/download-word-arsip/{{ item.id }}" class="btn btn-primary btn-sm me-2">📥 Download Word</a>
+            {% endif %}
+            <button onclick="window.print()" class="btn btn-success btn-sm me-2">🖨️ Cetak / Download PDF</button>
+            <a class="nav-link btn btn-outline-light btn-sm text-dark px-3" href="/arsip">Kembali ke Arsip</a>
+        </div>
+    </div>
+</nav>
+
+<div class="container">
+    <div class="mb-3 no-print">
+        <a href="/arsip" class="btn btn-light shadow-sm fw-bold">← Kembali ke Arsip</a>
+    </div>
+
+    <div class="document-page">
+        <!-- KOP SURAT / HEADER SEKOLAH -->
+        <div class="text-center border-bottom pb-3 mb-4">
+            <h4 class="fw-bold text-uppercase mb-1">{{ sekolah.nama_sekolah }}</h4>
+            <p class="text-muted small mb-1">{{ sekolah.alamat }}</p>
+            <h5 class="fw-bold text-uppercase mt-3 text-primary">{{ item.jenis_modul }}</h5>
+        </div>
+
+        <!-- KONTEN UTAMA / TABEL HEM & REKAP -->
+        {% if preview_data %}
+        <div class="card p-4 bg-light border mb-4">
+            <h5 class="fw-bold text-success mb-3">Tabel Analisis Hari Efektif Mengajar (HEM)</h5>
+            <div class="table-responsive">
+                <table class="table table-bordered table-striped align-middle small">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>Bulan</th>
+                            <th>Jml Minggu Kalender</th>
+                            <th>Minggu Tidak Efektif</th>
+                            <th>Minggu Efektif Belajar</th>
+                            <th>Jml Hari Sekolah</th>
+                            <th>Hari Tidak Efektif</th>
+                            <th>Hari Efektif Belajar</th>
+                            <th>Keterangan</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in preview_data %}
+                        <tr>
+                            <td class="fw-bold">{{ row[0] }}</td>
+                            <td class="text-center">{{ row[1] }}</td>
+                            <td class="text-center">{{ row[2] }}</td>
+                            <td class="text-center fw-bold text-danger">{{ row[3] }}</td>
+                            <td class="text-center">{{ row[4] }}</td>
+                            <td class="text-center">{{ row[5] }}</td>
+                            <td class="text-center fw-bold text-success">{{ row[6] }}</td>
+                            <td>{{ row[7] }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                    <tfoot class="table-secondary fw-bold">
+                        <tr>
+                            <td>TOTAL TAHUNAN</td>
+                            <td class="text-center">{{ totals.total_minggu_kalender }}</td>
+                            <td class="text-center">{{ totals.total_minggu_taktif }}</td>
+                            <td class="text-center text-danger">{{ totals.total_minggu_efektif }}</td>
+                            <td class="text-center">{{ totals.total_hari_sekolah }}</td>
+                            <td class="text-center">{{ totals.total_hari_taktif }}</td>
+                            <td class="text-center text-success">{{ totals.total_hari_efektif }}</td>
+                            <td>Akumulasi Tahun Pelajaran</td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+
+            <!-- REKAP TOTAL KOMPONEN TAHUNAN -->
+            <h5 class="fw-bold text-primary mt-4 mb-3">REKAP TOTAL KOMPONEN TAHUNAN</h5>
+            <div class="table-responsive">
+                <table class="table table-bordered align-middle small">
+                    <thead class="table-primary text-dark">
+                        <tr>
+                            <th>Komponen Analisis</th>
+                            <th class="text-center">Jumlah Total</th>
+                            <th class="text-center">Satuan</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Total Minggu Kalender</td>
+                            <td class="text-center fw-bold">{{ totals.total_minggu_kalender }}</td>
+                            <td class="text-center">Minggu</td>
+                        </tr>
+                        <tr>
+                            <td>Total Minggu Tidak Efektif</td>
+                            <td class="text-center fw-bold">{{ totals.total_minggu_taktif }}</td>
+                            <td class="text-center">Minggu</td>
+                        </tr>
+                        <tr class="table-warning">
+                            <td>Total Minggu Efektif Belajar</td>
+                            <td class="text-center fw-bold text-danger">{{ totals.total_minggu_efektif }}</td>
+                            <td class="text-center">Minggu</td>
+                        </tr>
+                        <tr>
+                            <td>Total Hari Sekolah</td>
+                            <td class="text-center fw-bold">{{ totals.total_hari_sekolah }}</td>
+                            <td class="text-center">Hari</td>
+                        </tr>
+                        <tr>
+                            <td>Total Hari Tidak Efektif</td>
+                            <td class="text-center fw-bold">{{ totals.total_hari_taktif }}</td>
+                            <td class="text-center">Hari</td>
+                        </tr>
+                        <tr class="table-success">
+                            <td>Total Hari Efektif Belajar</td>
+                            <td class="text-center fw-bold text-success">{{ totals.total_hari_efektif }}</td>
+                            <td class="text-center">Hari</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if not preview_data and item.konten %}
+        <div class="card p-4 bg-light border mb-4">
+            <div style="white-space: pre-line; font-size: 14px; line-height: 1.6;">
+                {{ item.konten }}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- TANDA TANGAN -->
+        <div class="row mt-5 pt-4">
+            <div class="col-4 text-center">
+                <p class="mb-5">Mengetahui,<br>Kepala Sekolah</p>
+                <p class="fw-bold text-decoration-underline mb-0">{{ sekolah.nama_kepsek }}</p>
+                <p class="small text-muted">NIP. {{ sekolah.nip_kepsek }}</p>
+            </div>
+            <div class="col-4"></div>
+            <div class="col-4 text-center">
+                <p class="mb-5">Bandung, {{ item.created_at[:10] }}<br>Guru Mata Pelajaran</p>
+                <p class="fw-bold text-decoration-underline mb-0">{{ item.nama_lengkap }}</p>
+                <p class="small text-muted">NIP. {{ item.nip }}</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

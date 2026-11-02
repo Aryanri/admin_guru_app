@@ -1,0 +1,1034 @@
+import os
+import sqlite3
+from datetime import datetime
+from flask import Flask, render_template, request, redirect, url_for, session, flash, send_file
+import pandas as pd
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+app = Flask(__name__)
+app.secret_key = 'super_secret_key_admin_guru_2026'
+DATABASE = 'database.db'
+UPLOAD_FOLDER = 'static/uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+def get_db():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    with get_db() as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                nama_lengkap TEXT NOT NULL,
+                nip TEXT DEFAULT '-',
+                mapel TEXT DEFAULT '-',
+                role TEXT CHECK(role IN ('superadmin', 'admin', 'guru')) NOT NULL,
+                status TEXT CHECK(status IN ('pending', 'active')) DEFAULT 'pending',
+                session_token TEXT,
+                last_login TIMESTAMP
+            )
+        ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS sekolah (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nama_sekolah TEXT,
+                alamat TEXT,
+                nama_kepsek TEXT,
+                nip_kepsek TEXT,
+                kop_surat TEXT
+            )
+        ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS arsip (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                jenis_modul TEXT,
+                topik TEXT,
+                konten TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+        ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS log_aktivitas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                aktivitas TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+        ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS custom_modul (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nama_modul TEXT,
+                kode_slug TEXT UNIQUE,
+                template_path TEXT
+            )
+        ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS notifikasi (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pesan TEXT,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE role = 'superadmin'")
+        if not cursor.fetchone():
+            cursor.execute("""
+                INSERT INTO users (username, password, nama_lengkap, nip, mapel, role, status)
+                VALUES ('superadmin', 'admin123', 'Rizwan Yanuar Rizaldi, S.Pd.', '198501012010011001', 'Informatika', 'superadmin', 'active')
+            """)
+        
+        cursor.execute("SELECT * FROM sekolah")
+        if not cursor.fetchone():
+            cursor.execute("""
+                INSERT INTO sekolah (nama_sekolah, alamat, nama_kepsek, nip_kepsek, kop_surat)
+                VALUES ('SMP/SMA Negeri Contoh Bandung', 'Jl. Pendidikan No. 1, Bandung', 'Drs. H. Ahmad Sutisna, M.Pd.', '196812121994031005', '')
+            """)
+        
+        cursor.execute("SELECT * FROM notifikasi")
+        if not cursor.fetchone():
+            cursor.execute("""
+                INSERT INTO notifikasi (pesan, is_active)
+                VALUES ('Info: Generator AI Kurikulum Merdeka BSKAP 2026 dengan C1-C6 dan Loading Animasi Diaktifkan.', 1)
+            """)
+        conn.commit()
+
+init_db()
+
+@app.route('/')
+def index():
+    if 'user_id' in session:
+        return redirect(url_for('dashboard'))
+    return redirect(url_for('login'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    db = get_db()
+    notif = db.execute("SELECT * FROM notifikasi ORDER BY id DESC LIMIT 1").fetchone()
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        if user and user['password'] == password:
+            if user['status'] == 'pending':
+                flash('Akun Anda masih menunggu konfirmasi oleh Admin. Silakan hubungi Admin via WhatsApp: 081321984848.', 'warning')
+                return redirect(url_for('login'))
+            import uuid
+            new_token = str(uuid.uuid4())
+            db.execute("UPDATE users SET session_token = ?, last_login = CURRENT_TIMESTAMP WHERE id = ?", (new_token, user['id']))
+            db.commit()
+            session['user_id'] = user['id']
+            session['username'] = user['username']
+            session['nama_lengkap'] = user['nama_lengkap']
+            session['nip'] = user['nip']
+            session['mapel'] = user['mapel']
+            session['role'] = user['role']
+            session['session_token'] = new_token
+            flash('Login berhasil!', 'success')
+            return redirect(url_for('dashboard'))
+        else:
+            flash('Username atau password salah!', 'danger')
+    return render_template('login.html', notif=notif)
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        nama = request.form['nama']
+        nip = request.form.get('nip', '-')
+        username = request.form['username']
+        password = request.form['password']
+        mapel = request.form.get('mapel', 'Umum')
+        db = get_db()
+        try:
+            db.execute("INSERT INTO users (username, password, nama_lengkap, nip, mapel, role, status) VALUES (?, ?, ?, ?, ?, 'guru', 'pending')",
+                       (username, password, nama, nip, mapel))
+            db.commit()
+            flash('Pendaftaran berhasil! Akun Anda tidak dapat digunakan sebelum dikonfirmasi oleh Admin. Silakan konfirmasi ke Admin via WhatsApp: 081321984848.', 'warning')
+            return redirect(url_for('login'))
+        except sqlite3.IntegrityError:
+            flash('Username sudah terdaftar!', 'danger')
+    return render_template('register.html')
+
+@app.route('/dashboard')
+def dashboard():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    db = get_db()
+    user = db.execute("SELECT session_token FROM users WHERE id = ?", (session['user_id'],)).fetchone()
+    if not user or user['session_token'] != session.get('session_token'):
+        session.clear()
+        flash('Akun Anda telah login di perangkat lain.', 'danger')
+        return redirect(url_for('login'))
+    logs = db.execute("SELECT aktivitas, timestamp FROM log_aktivitas WHERE user_id = ? ORDER BY id DESC LIMIT 3", (session['user_id'],)).fetchall()
+    sekolah = db.execute("SELECT * FROM sekolah LIMIT 1").fetchone()
+    current_user = db.execute("SELECT * FROM users WHERE id = ?", (session['user_id'],)).fetchone()
+    return render_template('dashboard.html', logs=logs, sekolah=sekolah, current_user=current_user)
+
+@app.route('/update-sekolah', methods=['POST'])
+def update_sekolah():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    nama_sekolah = request.form['nama_sekolah']
+    alamat = request.form['alamat']
+    nama_kepsek = request.form['nama_kepsek']
+    nip_kepsek = request.form['nip_kepsek']
+    
+    file = request.files.get('kop_surat')
+    db = get_db()
+    
+    if file and file.filename != '':
+        filename = file.filename
+        path = os.path.join(UPLOAD_FOLDER, filename)
+        file.save(path)
+        db.execute("UPDATE sekolah SET nama_sekolah = ?, alamat = ?, nama_kepsek = ?, nip_kepsek = ?, kop_surat = ?",
+                   (nama_sekolah, alamat, nama_kepsek, nip_kepsek, filename))
+    else:
+        db.execute("UPDATE sekolah SET nama_sekolah = ?, alamat = ?, nama_kepsek = ?, nip_kepsek = ?",
+                   (nama_sekolah, alamat, nama_kepsek, nip_kepsek))
+    db.commit()
+    flash('Profil sekolah berhasil diperbarui!', 'success')
+    return redirect(url_for('dashboard'))
+
+@app.route('/generator', methods=['GET', 'POST'])
+def generator():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    db = get_db()
+    custom_tabs = db.execute("SELECT * FROM custom_modul").fetchall()
+    if request.method == 'POST':
+        jenis = request.form['jenis_modul']
+        jenjang = request.form['jenjang']
+        kelas = request.form['kelas']
+        fase = request.form.get('fase', 'Fase E')
+        mapel = request.form['mapel']
+        metode = request.form.get('metode', 'Project Based Learning (PjBL)')
+        aktivitas = request.form.get('aktivitas', 'Investigasi dan Observasi Lapangan')
+        jumlah_jp = request.form.get('jumlah_jp', '3 JP')
+        jp_menit = request.form.get('jp_menit', '45 Menit')
+        kesulitan = request.form.get('kesulitan', 'C3 (Aplikasi)')
+        jumlah_pg = request.form.get('jumlah_pg', '10')
+        jumlah_esai = request.form.get('jumlah_esai', '5')
+        jumlah_isian = request.form.get('jumlah_isian', '5')
+        topik = request.form['topik']
+        ruang_lingkup = request.form.get('ruang_lingkup', 'Umum Kurikulum Merdeka')
+        
+        user_info = db.execute("SELECT nama_lengkap, nip FROM users WHERE id = ?", (session['user_id'],)).fetchone()
+        guru_nama = user_info['nama_lengkap'] if user_info else session.get('nama_lengkap', 'Guru')
+        guru_nip = user_info['nip'] if user_info else session.get('nip', '-')
+        
+        cache_key = f"{jenis} | {mapel} | {kelas} | {jenjang} | {fase} | {topik} | {kesulitan}"
+        cached = db.execute("SELECT konten FROM arsip WHERE jenis_modul = ? AND topik = ? LIMIT 1", (jenis, cache_key)).fetchone()
+        
+        cp_teks = request.form.get('cp_teks', '')
+        if jenis == 'CP-TP-ATP' and cp_teks.strip():
+            cache_key = f"{jenis} | {mapel} | {kelas} | {jenjang} | {topik} | {cp_teks[:30]}"
+            cached = db.execute("SELECT konten FROM arsip WHERE jenis_modul = ? AND topik = ? LIMIT 1", (jenis, cache_key)).fetchone()
+
+        if cached:
+            hasil = cached['konten']
+            source_info = "Diambil dari Cache Database (Hemat Token & Efisiensi Request)"
+        else:
+            if jenis == 'CP-TP-ATP':
+                hasil = f'''[PERUMUSAN CAPAIAN PEMBELAJARAN, TUJUAN PEMBELAJARAN, & ALUR TUJUAN PEMBELAJARAN (CP-TP-ATP)]
+Mata Pelajaran: {mapel}
+Jenjang & Kelas: {jenjang} - {kelas}
+Topik / Fokus Materi: {topik}
+Guru Pengampu: {guru_nama} (NIP. {guru_nip})
+
+---
+### 1. ANALISIS ELEMEN CAPAIAN PEMBELAJARAN (CP)
+Berdasarkan Keputusan Kepala BSKAP tentang Capaian Pembelajaran Kurikulum Merdeka:
+" {cp_teks} "
+
+**Uraian Elemen & Kompetensi Utama:**
+- **Elemen Pemahaman Konsep:** Peserta didik mampu menguasai inti materi {mapel} pada topik {topik} dengan pendekatan analitis dan kontekstual.
+- **Elemen Keterampilan Proses / Praktik:** Peserta didik mengembangkan kemampuan bernalar kritis, observasi, eksperimen, serta kolaborasi dalam memecahkan masalah nyata.
+- **Kompetensi Utama yang Dituju:** Menganalisis, mengevaluasi, mengaplikasikan konsep, serta mengkomunikasikan hasil pemecahan masalah secara ilmiah dan sistematis.
+
+---
+### 2. RUMUSAN TUJUAN PEMBELAJARAN (TP)
+Penurunan CP ke dalam Tujuan Pembelajaran (TP) yang memuat Kompetensi (Kata Kerja Operasional) dan Lingkup Materi:
+1. **TP.1 (C2 - Memahami & Mengidentifikasi):** Peserta didik mampu menjelaskan konsep dasar dan karakteristik utama dari {topik} dalam {mapel}.
+2. **TP.2 (C3 - Mengaplikasikan & Menerapkan):** Peserta didik mampu menerapkan prinsip-prinsip {topik} pada studi kasus sederhana di lingkungan sekitar.
+3. **TP.3 (C4 - Menganalisis):** Peserta didik mampu menganalisis hubungan sebab-akibat serta data kompleks terkait {topik}.
+4. **TP.4 (C6 - Mencipta / Projek):** Peserta didik mampu merancang solusi, model, atau proyek inovatif berdasarkan pemahaman mendalam tentang {topik}.
+
+---
+### 3. ALUR TUJUAN PEMBELAJARAN (ATP)
+Disusun secara hierarkis dan prosedural dari tingkat dasar ke kompleks:
+
+| No | Elemen | Tujuan Pembelajaran (TP) | Materi Pokok | Alokasi Waktu (JP) | Profil Pelajar Pancasila |
+|---|---|---|---|---|---|
+| 1 | Pemahaman Konsep | Peserta didik mampu menjelaskan konsep dasar dan karakteristik utama dari {topik}. | Pengantar & Definisi Fundamental {topik} | 6 JP | Beriman, Bertakwa kepada Tuhan YME, dan Berakhlak Mulia |
+| 2 | Penerapan / Aplikasi | Peserta didik mampu menerapkan prinsip-prinsip {topik} pada studi kasus sederhana. | Studi Kasus & Penerapan Praktis | 8 JP | Mandiri & Bernalar Kritis |
+| 3 | Analisis Mendalam | Peserta didik mampu menganalisis hubungan sebab-akibat serta data kompleks terkait {topik}. | Analisis Kritis & Eksplorasi Data | 10 JP | Bernalar Kritis & Kreatif |
+| 4 | Kreasi & Proyek | Peserta didik mampu merancang solusi, model, atau proyek inovatif berdasarkan {topik}. | Projek Kolaboratif & Presentasi Karya | 10 JP | Bergotong Royong & Kreatif |
+
+*Total Alokasi Waktu: 34 JP (Disesuaikan dengan Alokasi Efektif Semester/Tahun Pelajaran).*'''
+            elif "Bank Soal" in jenis:
+                hasil = f"[{jenis.upper()}] Mata Pelajaran: {mapel} | Jenjang: {jenjang} ({kelas} - {fase}) | Topik: {topik} | Ruang Lingkup: {ruang_lingkup} | Tingkat Kognitif BSKAP: {kesulitan} | Komposisi Soal: {jumlah_pg} PG, {jumlah_esai} Esai, {jumlah_isian} Isian Singkat. Guru Pengampu: {guru_nama} (NIP. {guru_nip}). Soal terstruktur lengkap dengan kunci jawaban dan rubrik penilaian BSKAP 2026."
+            elif jenis == 'Modul Ajar/RPP':
+                sekolah_info = db.execute("SELECT * FROM sekolah LIMIT 1").fetchone()
+                nama_sekolah = sekolah_info['nama_sekolah'] if sekolah_info else "SMP/SMA Negeri Contoh Bandung"
+                nama_kepsek = sekolah_info['nama_kepsek'] if sekolah_info else "Drs. H. Ahmad Sutisna, M.Pd."
+                nip_kepsek = sekolah_info['nip_kepsek'] if sekolah_info else "196812121994031005"
+                
+                hasil = f'''[MODUL AJAR KURIKULUM MERDEKA - SIAP PAKAI]
+Bertindaklah sebagai Guru Profesional dan Pakar Kurikulum Merdeka di Indonesia.
+Berikut adalah Modul Ajar lengkap sesuai standar BSKAP Kurikulum Merdeka:
+
+--------------------------------------------------------------------------------
+I. IDENTITAS MODUL AJAR
+--------------------------------------------------------------------------------
+- Nama Penyusun / Guru: {guru_nama}
+- NIP Guru: {guru_nip}
+- Satuan Pendidikan: {nama_sekolah}
+- Mata Pelajaran: {mapel}
+- Jenjang / Kelas / Fase: {jenjang} / {kelas} / {fase}
+- Alokasi Waktu: {jumlah_jp} ({jp_menit} per JP)
+- Model Pembelajaran: {metode}
+- Pendekatan / Aktivitas: {aktivitas}
+- Topik / Materi Pembelajaran: {topik}
+
+--------------------------------------------------------------------------------
+II. IDENTIFIKASI & DESAIN PEMBELAJARAN
+--------------------------------------------------------------------------------
+A. Identifikasi Peserta Didik:
+- Pengetahuan Awal: Peserta didik telah memahami konsep dasar terkait {mapel} serta fenomena di lingkungan sekitar.
+- Keterampilan Dasar: Kemampuan bernalar kritis, literasi informasi, dan komunikasi kolaboratif.
+- Bakat, Minat & Gaya Belajar: Beragam (Visual, Auditorial, Kinestetik) dengan kecenderungan pembelajaran berbasis proyek dan investigasi.
+
+B. Delapan Dimensi Profil Lulusan & Lintas Disiplin:
+- Profil Pelajar Pancasila: Beriman, Bertakwa kepada Tuhan YME, dan Berakhlak Mulia; Mandiri; Bernalar Kritis; Bergotong Royong; Kreatif.
+- Lintas Disiplin Ilmu: Terintegrasi dengan Literasi Digital dan Pendidikan Karakter.
+
+C. Desain Pembelajaran:
+- Capaian Pembelajaran (CP): Peserta didik mampu menganalisis, mengevaluasi, dan mengaplikasikan konsep {mapel} pada topik {topik} secara mendalam.
+- Tujuan Pembelajaran: Peserta didik dapat menguasai materi {topik} melalui pendekatan {metode} dengan aktivitas {aktivitas}.
+
+--------------------------------------------------------------------------------
+III. SARANA, PRASARANA & TARGET PESERTA DIDIK
+--------------------------------------------------------------------------------
+- Sarana & Prasarana: Laptop, Proyektor/Infocus, Jaringan Internet, Buku Teks Kurikulum Merdeka, Lembar Kerja Peserta Didik (LKPD).
+- Target Peserta Didik: Peserta didik reguler / tipikal (tanpa hambatan belajar khusus).
+
+--------------------------------------------------------------------------------
+IV. PEMAHAMAN BERMAKNA & PERTANYAAN PEMANTIK
+--------------------------------------------------------------------------------
+- Pemahaman Bermakna: Pemahaman mengenai {topik} dapat diaplikasikan secara langsung untuk memecahkan permasalahan nyata di kehidupan sehari-hari secara kritis dan kreatif.
+- Pertanyaan Pemantik (Minimal 3):
+  1. Apa yang Anda ketahui tentang fenomena atau konsep dasar {topik} dalam kehidupan sehari-hari?
+  2. Bagaimana prinsip kerja atau penerapan {topik} dapat membantu menyelesaikan persoalan di masyarakat?
+  3. Tantangan apa saja yang mungkin timbul saat kita mengaplikasikan konsep {topik} secara langsung?
+
+--------------------------------------------------------------------------------
+V. MATERI AJAR (RINGKASAN EKSLUSIF)
+--------------------------------------------------------------------------------
+1. Konsep Fundamental {topik}: Materi ini mengkaji prinsip-prinsip utama dalam {mapel} yang dirancang untuk membangun pemahaman konseptual yang kokoh.
+2. Analisis Kasus & Kontekstualisasi: Peserta didik diajak untuk mengkaji studi kasus nyata yang relevan dengan perkembangan ilmu pengetahuan dan teknologi saat ini.
+3. Sintesis dan Implementasi: Pembelajaran diarahkan agar peserta didik mampu merumuskan solusi atau karya nyata berdasarkan materi yang telah dipelajari.
+
+--------------------------------------------------------------------------------
+VI. LANGKAH-LANGKAH PEMBELAJARAN ({jumlah_jp} - {jp_menit}/JP)
+--------------------------------------------------------------------------------
+A. Kegiatan Pendahuluan (15 Menit)
+- Salam, doa pembuka, dan pengecekan kehadiran peserta didik.
+- Guru memberikan Apersepsi dan mengajukan Pertanyaan Pemantik terkait {topik}.
+- Penyampaian tujuan pembelajaran, cakupan materi, dan skenario kegiatan menggunakan pendekatan {aktivitas}.
+
+B. Kegiatan Inti (Skenario Sesuai Alokasi Waktu) - Model: {metode}
+- Memahami (Berkesadaran): Eksplorasi konsep dasar melalui {aktivitas} dan kajian literatur.
+- Mengaplikasi (Menggembirakan): Diskusi kelompok, eksperimen, atau pemecahan masalah berdasarkan sintaks {metode}.
+- Merefleksi (Bermakna + Berkesadaran): Presentasi hasil kerja kelompok, tanggapan antar kelompok, dan penguatan oleh guru.
+
+C. Kegiatan Penutup (15 Menit)
+- Guru bersama peserta didik menyimpulkan poin-poin penting pembelajaran hari ini.
+- Pelaksanaan refleksi pembelajaran (kesan, kendala, dan pemahaman baru).
+- Informasi penugasan mandiri / kelompok dan doa penutup.
+
+--------------------------------------------------------------------------------
+VII. ASESMEN PEMBELAJARAN
+--------------------------------------------------------------------------------
+A. Asesmen Awal (Diagnostik):
+- Teknik: Tanya jawab lisan di awal pembelajaran untuk mengecek pengetahuan prasyarat.
+- Instrumen: Daftar pertanyaan diagnostik singkat.
+
+B. Asesmen Formatif (Proses):
+- Teknik: Observasi keaktifan diskusi dan kualitas kolaborasi tim menggunakan Rubrik Skala Likert (1-4).
+
+C. Asesmen Sumatif (Akhir):
+- Teknik: Tes tertulis (Pilihan Ganda & Esai) dan penugasan proyek.
+- Soal Pilihan Ganda: (Contoh soal evaluasi kognitif terkait {topik}).
+- Kunci Jawaban: Tersedia lengkap beserta rubrik penilaian.
+
+--------------------------------------------------------------------------------
+VIII. KEGIATAN REMEDIAL DAN PENGAYAAN
+--------------------------------------------------------------------------------
+- Remedial: Diberikan kepada peserta didik yang belum mencapai Kriteria Ketercapaian Tujuan Pembelajaran (KKTP) melalui bimbingan khusus dan penugasan ulang terarah.
+- Pengayaan: Diberikan kepada peserta didik yang telah mencapai KKTP melalui tantangan studi kasus tingkat lanjut atau pendalaman materi mandiri.
+
+--------------------------------------------------------------------------------
+IX. REFLEKSI PESERTA DIDIK DAN GURU
+--------------------------------------------------------------------------------
+- Refleksi Peserta Didik: Apa bagian paling menarik dari pembelajaran hari ini? Bagian mana yang masih membingungkan?
+- Refleksi Guru: Apakah metode {metode} efektif meningkatkan keaktifan peserta didik? Kendala apa saja yang perlu diperbaiki pada pertemuan berikutnya?
+
+--------------------------------------------------------------------------------
+X. LAMPIRAN (LKPD & RUBRIK PENILAIAN SKALA LIKERT)
+--------------------------------------------------------------------------------
+1. Lembar Kerja Peserta Didik (LKPD): Panduan praktis aktivitas peserta didik untuk pertemuan ini.
+2. Rubrik Penilaian Skala Likert:
+   - Skor 4: Sangat Baik (Selalu menunjukkan indikator secara mandiri & konsisten)
+   - Skor 3: Baik (Sering menunjukkan indikator dengan sedikit dorongan)
+   - Skor 2: Cukup (Kadang-kadang menunjukkan indikator)
+   - Skor 1: Perlu Bimbingan (Belum menunjukkan indikator)
+
+Mengetahui,
+Kepala {nama_sekolah}                          Bandung, {datetime.now().strftime('%d %B %Y')}
+                                               Guru Mata Pelajaran,
+
+_______________________________                _______________________________
+NIP. {nip_kepsek}                              NIP. {guru_nip}
+'''
+            elif jenis == 'LKPD Siswa':
+                sekolah_info = db.execute("SELECT * FROM sekolah LIMIT 1").fetchone()
+                nama_sekolah = sekolah_info['nama_sekolah'] if sekolah_info else "SMP/SMA Negeri Contoh Bandung"
+                
+                hasil = f'''[LEMBAR KERJA PESERTA DIDIK (LKPD) - LENGKAP & BERBASIS BSKAP]
+Anda adalah seorang Guru {mapel} yang profesional, kreatif, dan inspiratif pada jenjang {jenjang} kelas {kelas} ({fase}).
+Berikut adalah Lembar Kerja Peserta Didik (LKPD) yang dirancang secara lengkap dan terstruktur berdasarkan model pembelajaran {metode}, dengan topik pembahasan "{topik}".
+
+---
+### 1. IDENTITAS DIRI PESERTA DIDIK
+- Nama Peserta Didik: _________________________________________
+- Mata Pelajaran: {mapel}
+- Nomor Absen: ______
+- Kelas / Fase: {kelas} / {fase}
+- Tanggal Pengerjaan: _________________________________________
+- Satuan Pendidikan: {nama_sekolah}
+- Guru Pengampu: {guru_nama} (NIP. {guru_nip})
+
+---
+### 2. TUJUAN PEMBELAJARAN & ACUAN BSKAP
+Berdasarkan Capaian Pembelajaran (CP) dan Alur Tujuan Pembelajaran (ATP) Kurikulum Merdeka pada topik "{topik}":
+- **Tujuan Pembelajaran:** Peserta didik mampu menganalisis, mengidentifikasi, dan mengaplikasikan konsep {topik} melalui pendekatan {metode} dengan tingkat kognitif {kesulitan}.
+- **Pengembangan Dimensi Profil Lulusan:** Beriman dan berakhlak mulia, bernalar kritis, mandiri, bergotong royong, serta kreatif.
+
+---
+### 3. PETUNJUK PENGGUNAAN LKPD
+1. Berdoalah sebelum mulai mengerjakan LKPD ini agar diberikan kemudahan dan pemahaman.
+2. Bacalah setiap petunjuk, teks ringkas, serta studi kasus yang disajikan dengan teliti dan penuh kesadaran.
+3. Gunakan berbagai sumber belajar pendukung (buku teks, internet, atau hasil diskusi kelompok).
+4. Kerjakan setiap tugas pada kolom atau ruang jawaban yang telah disediakan secara mandiri maupun berkelompok.
+5. Jika mengalami kesulitan, diskusikan dengan teman sekelompok atau tanyakan kepada guru pengampu.
+
+---
+### 4. SINTAKS PEMBELAJARAN & AKTIVITAS SISWA ({metode})
+Tahapan kegiatan belajar disusun sesuai sintaks model {metode} pada topik "{topik}", lengkap dengan aktivitas siswa dan ruang kerja:
+
+A. Tahap 1: Orientasi Masalah & Stimulus Awal
+- **Aktivitas Guru:** Menyajikan fenomena nyata / isu esensial terkait {topik}.
+- **Aktivitas Peserta Didik:** Mengamati, menanya, dan mencatat pokok permasalahan yang ditemukan.
+- **Kolom Catatan & Pengamatan Siswa:**
+  _________________________________________________________________________________
+  _________________________________________________________________________________
+  _________________________________________________________________________________
+
+B. Tahap 2: Pengorganisasian Belajar & Investigasi Mandiri/Kelompok
+- **Aktivitas Guru:** Membimbing pembentukan kelompok dan pembagian tugas investigasi.
+- **Aktivitas Peserta Didik:** Merumuskan hipotesis, mencari data, dan mengeksplorasi sumber belajar.
+- **Kolom Perencanaan & Investigasi Siswa:**
+  _________________________________________________________________________________
+  _________________________________________________________________________________
+  _________________________________________________________________________________
+
+C. Tahap 3: Pengembangan & Penyajian Hasil Karya / Proyek
+- **Aktivitas Guru:** Memfasilitasi proses sintesis data dan pembuatan laporan.
+- **Aktivitas Peserta Didik:** Menyusun laporan hasil penyelidikan dan mempersiapkan presentasi karya.
+- **Kolom Hasil Kerja / Draf Proyek Siswa:**
+  _________________________________________________________________________________
+  _________________________________________________________________________________
+  _________________________________________________________________________________
+
+---
+### 5. PENGALAMAN BELAJAR MENDALAM (DEEP LEARNING)
+
+#### A. MEMAHAMI (Eksplorasi Konsep & Literasi)
+*Bacalah ringkasan materi berikut dengan cermat:*
+> **Materi Esensial {topik}:**
+> Dalam mempelajari {mapel} khususnya pada topik {topik}, pemahaman terhadap konsep fundamental sangat menentukan kemampuan problem solving di dunia nyata. Peserta didik dituntut untuk memahami keterkaitan antarvariabel, prinsip kerja, serta dampak positif maupun tantangan yang menyertainya dalam konteks Kurikulum Merdeka.
+
+**Soal Pemahaman Konsep (Minimal 3 Soal):**
+1. Jelaskan definisi dan karakteristik utama dari {topik} berdasarkan pemahaman Anda setelah membaca materi di atas!
+   - *Jawaban:* _____________________________________________________________________
+2. Apa saja elemen atau komponen penting yang membentuk sistem atau prinsip kerja {topik}?
+   - *Jawaban:* _____________________________________________________________________
+3. Mengapa penguasaan terhadap materi {topik} ini penting dalam kehidupan sehari-hari dan pengembangan ilmu pengetahuan?
+   - *Jawaban:* _____________________________________________________________________
+
+#### B. MENGAPLIKASIKAN (Studi Kasus & Kontekstualisasi Nyata)
+*Studi Kasus Kontekstual:*
+Perhatikan situasi di lingkungan sekitar Anda yang berkaitan erat dengan pemanfaatan atau permasalahan pada {topik}. Bayangkan Anda diminta untuk merancang solusi nyata atau analisis mendalam terhadap kasus tersebut.
+
+- **Instruksi Kerja:** 
+  1. Identifikasi permasalahan nyata yang terjadi di sekitar Anda terkait {topik}.
+  2. Tuliskan langkah-langkah penerapan solusi menggunakan konsep {mapel}.
+  3. Sajikan hasil analisis Anda pada kolom jawaban di bawah ini secara sistematis.
+
+- **Ruang Jawaban Peserta Didik:**
+  _________________________________________________________________________________
+  _________________________________________________________________________________
+  _________________________________________________________________________________
+  _________________________________________________________________________________
+
+#### C. MEREFLEKSIKAN (Evaluasi Proses & Metakognisi)
+*Jawablah pertanyaan berikut untuk meninjau kembali proses belajar yang telah Anda lalui:*
+1. Bagian manakah dari materi atau aktivitas pembelajaran hari ini yang paling berkesan dan mudah Anda pahami? Mengapa?
+   - *Jawaban:* _____________________________________________________________________
+2. Kendala atau kesulitan apa saja yang Anda hadapi selama mengerjakan LKPD ini, dan bagaimana cara Anda mengatasinya?
+   - *Jawaban:* _____________________________________________________________________
+3. Apa rencana perbaikan atau tindak lanjut yang akan Anda lakukan agar penguasaan Anda terhadap {topik} semakin meningkat di pertemuan berikutnya?
+   - *Jawaban:* _____________________________________________________________________
+
+---
+### 6. BAGIAN PENUTUP & CEK PEMAHAMAN DIRI
+- **Pesan Penyemangat:** "Tetaplah bersemangat, berpikir kritis, dan jadilah pembelajar sepanjang hayat yang membawa kebermanfaatan bagi sesama!"
+- **Catatan Guru / Evaluasi Pembelajaran:** 
+  *(Catatan khusus atau apresiasi dari guru pengampu terhadap keaktifan dan hasil kerja peserta didik)*
+  _________________________________________________________________________________
+
+- **Cek Pemahaman Diri (Self-Assessment Checklist):**
+  Berikan tanda centang (✔) pada kolom sesuai dengan tingkat penguasaan Anda saat ini:
+  | No | Indikator Kompetensi Diri | Belum Paham | Cukup Paham | Sangat Paham |
+  |:---:|---|:---:|:---:|:---:|
+  | 1 | Saya mampu menjelaskan konsep dasar {topik} dengan baik. | [ ] | [ ] | [ ] |
+  | 2 | Saya aktif berdiskusi dan berkontribusi dalam kelompok. | [ ] | [ ] | [ ] |
+  | 3 | Saya mampu menyelesaikan studi kasus terkait {topik}. | [ ] | [ ] | [ ] |
+
+Bandung, {datetime.now().strftime('%d %B %Y')}
+Mengetahui,
+Guru Mata Pelajaran,
+
+________________________________________
+{guru_nama}
+NIP. {guru_nip}
+'''
+
+            else:
+                hasil = f"[{jenis.upper()}] Mata Pelajaran: {mapel} | Jenjang: {jenjang} ({kelas} - {fase}) | Topik: {topik} | Ruang Lingkup: {ruang_lingkup} | Metode: {metode} | Aktivitas: {aktivitas} | Tingkat Kognitif: {kesulitan} | Guru Pengampu: {guru_nama} (NIP. {guru_nip}). Dokumen pembelajaran Kurikulum Merdeka siap cetak." 
+            
+            source_info = "Generate baru via AI (Disimpan ke Arsip & Cache)"
+            db.execute("INSERT INTO arsip (user_id, jenis_modul, topik, konten) VALUES (?, ?, ?, ?)",
+                       (session['user_id'], jenis, cache_key, hasil))
+        
+        db.execute("INSERT INTO log_aktivitas (user_id, aktivitas) VALUES (?, ?)",
+                   (session['user_id'], f"Generate {jenis} - {topik} ({source_info})"))
+        db.commit()
+        
+        flash(f"Berhasil generate {jenis}! ({source_info})", 'success')
+        
+        arsip_rec = db.execute("SELECT id FROM arsip WHERE jenis_modul = ? AND topik = ? ORDER BY id DESC LIMIT 1", (jenis, cache_key)).fetchone()
+        arsip_id = arsip_rec['id'] if arsip_rec else None
+
+        return render_template('generator.html', custom_tabs=custom_tabs, hasil=hasil, active_tab=jenis, arsip_id=arsip_id)
+
+    return render_template('generator.html', custom_tabs=custom_tabs, hasil=None, active_tab='Modul Ajar/RPP')
+
+@app.route('/generator-hem', methods=['POST'])
+def generator_hem():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    
+    jenjang = request.form.get('jenjang', 'SMA/SMK/MA')
+    tahun_ajaran = request.form.get('tahun_ajaran', '2025/2026')
+    sistem_hari = request.form.get('sistem_hari', '5 Hari Kerja (Senin–Jumat)')
+    
+    file = request.files.get('kalender_file')
+    uploaded_source = "Berdasarkan Kalender Pendidikan Resmi (Kaldik Jabar / Kemendikdasmen)"
+    if file and file.filename != '':
+        path = os.path.join(UPLOAD_FOLDER, file.filename)
+        file.save(path)
+        uploaded_source = f"Dianalisis dari Upload Kalender ({file.filename})"
+
+    data = [
+        ["Juli 2025", 4, 3, 1, 22, 16, 6, "Masa Pengenalan Lingkungan Sekolah (MPLS) & Awal Tahun"],
+        ["Agustus 2025", 5, 1, 4, 21, 1, 20, "17 Agustus (HUT Kemerdekaan RI)"],
+        ["September 2025", 4, 0, 4, 22, 1, 21, "Peringatan Maulid Nabi SAW"],
+        ["Oktober 2025", 4, 0, 4, 23, 0, 23, "Pembelajaran Reguler Efektif"],
+        ["November 2025", 4, 0, 4, 21, 0, 21, "Pembelajaran Reguler Efektif"],
+        ["Desember 2025", 4, 3, 1, 22, 12, 10, "STS/SAS Semester Ganjil, Libur Semester"],
+        ["Januari 2026", 5, 1, 4, 22, 1, 21, "Awal Semester Genap"],
+        ["Februari 2026", 4, 0, 4, 20, 1, 19, "Isra Mikraj / Tahun Baru Imlek"],
+        ["Maret 2026", 4, 2, 2, 21, 7, 14, "Libur Awal Ramadan & Hari Raya Idulfitri"],
+        ["April 2026", 4, 1, 3, 22, 4, 18, "Libur Hari Raya Idulfitri / Cuti Bersama"],
+        ["Mei 2026", 4, 1, 3, 20, 2, 18, "Hari Buruh, Kenaikan Isa Almasih, Waisak"],
+        ["Juni 2026", 4, 3, 1, 22, 15, 7, "Asesmen Sumatif Akhir Tahun (ASAT) & Libur Kenaikan Kelas"]
+    ]
+
+    tot_minggu_kal = sum(row[1] for row in data)
+    tot_minggu_taktif = sum(row[2] for row in data)
+    tot_minggu_efektif = sum(row[3] for row in data)
+    tot_hari_sekolah = sum(row[4] for row in data)
+    tot_hari_taktif = sum(row[5] for row in data)
+    tot_hari_efektif = sum(row[6] for row in data)
+
+    totals = {
+        "total_minggu_kalender": tot_minggu_kal,
+        "total_minggu_taktif": tot_minggu_taktif,
+        "total_minggu_efektif": tot_minggu_efektif,
+        "total_hari_sekolah": tot_hari_sekolah,
+        "total_hari_taktif": tot_hari_taktif,
+        "total_hari_efektif": tot_hari_efektif
+    }
+
+    db = get_db()
+    user_info = db.execute("SELECT nama_lengkap, nip FROM users WHERE id = ?", (session['user_id'],)).fetchone()
+    guru_nama = user_info['nama_lengkap'] if user_info else session.get('nama_lengkap', 'Guru')
+    guru_nip = user_info['nip'] if user_info else session.get('nip', '-')
+    sekolah = db.execute("SELECT * FROM sekolah LIMIT 1").fetchone()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Analisis HEM"
+    ws.views.sheetView[0].showGridLines = True
+
+    COLOR_HEADER_FILL = "1F4E79"
+    COLOR_HEADER_FONT = "FFFFFF"
+    COLOR_ACCENT_FILL = "FCE4D6"
+    COLOR_TOTAL_FILL = "D9E1F2"
+    COLOR_ZEBRA_FILL = "F9F9F9"
+
+    font_title = Font(name="Arial", size=14, bold=True, color="1F4E79")
+    font_subtitle = Font(name="Arial", size=10, italic=True, color="595959")
+    font_header = Font(name="Arial", size=10, bold=True, color=COLOR_HEADER_FONT)
+    font_bold = Font(name="Arial", size=10, bold=True)
+    font_normal = Font(name="Arial", size=10)
+
+    fill_header = PatternFill(start_color=COLOR_HEADER_FILL, end_color=COLOR_HEADER_FILL, fill_type="solid")
+    fill_accent = PatternFill(start_color=COLOR_ACCENT_FILL, end_color=COLOR_ACCENT_FILL, fill_type="solid")
+    fill_total = PatternFill(start_color=COLOR_TOTAL_FILL, end_color=COLOR_TOTAL_FILL, fill_type="solid")
+    fill_zebra = PatternFill(start_color=COLOR_ZEBRA_FILL, end_color=COLOR_ZEBRA_FILL, fill_type="solid")
+
+    thin_border = Border(
+        left=Side(style='thin', color='BFBFBF'), right=Side(style='thin', color='BFBFBF'),
+        top=Side(style='thin', color='BFBFBF'), bottom=Side(style='thin', color='BFBFBF')
+    )
+    double_bottom_border = Border(
+        left=Side(style='thin', color='BFBFBF'), right=Side(style='thin', color='BFBFBF'),
+        top=Side(style='thin', color='BFBFBF'), bottom=Side(style='double', color='000000')
+    )
+
+    ws['A1'] = f"ANALISIS HARI EFEKTIF MENGAJAR (HEM) - {jenjang}"
+    ws['A1'].font = font_title
+    ws['A2'] = f"Satuan Pendidikan: {sekolah['nama_sekolah']} | Guru Pengampu: {guru_nama} (NIP. {guru_nip}) | Tahun Pelajaran: {tahun_ajaran}"
+    ws['A2'].font = font_subtitle
+    ws.append([])
+
+    headers = [
+        "Bulan", "Jumlah Minggu Kalender", "Minggu Tidak Efektif", 
+        "Minggu Efektif Belajar", "Jumlah Hari Sekolah", "Hari Tidak Efektif", 
+        "Hari Efektif Belajar", "Keterangan"
+    ]
+    ws.append(headers)
+
+    header_row_idx = 4
+    for col_idx in range(1, len(headers) + 1):
+        cell = ws.cell(row=header_row_idx, column=col_idx)
+        cell.font = font_header
+        cell.fill = fill_header
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin_border
+    ws.row_dimensions[header_row_idx].height = 28
+
+    start_row = 5
+    for r_idx, row_data in enumerate(data, start=start_row):
+        ws.append(row_data)
+        for c_idx in range(1, len(row_data) + 1):
+            cell = ws.cell(row=r_idx, column=c_idx)
+            cell.font = font_normal
+            cell.border = thin_border
+            if c_idx == 1:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+            elif c_idx == 8:
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            else:
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                
+            if c_idx in [4, 7]:
+                cell.fill = fill_accent
+                cell.font = font_bold
+            elif r_idx % 2 == 0:
+                cell.fill = fill_zebra
+        ws.row_dimensions[r_idx].height = 20
+
+    end_data_row = start_row + len(data) - 1
+    total_row_idx = end_data_row + 1
+    ws.cell(row=total_row_idx, column=1, value="TOTAL TAHUNAN").font = font_bold
+    ws.cell(row=total_row_idx, column=1).alignment = Alignment(horizontal="left", vertical="center")
+
+    for c_idx in range(2, 8):
+        col_letter = get_column_letter(c_idx)
+        formula = f"=SUM({col_letter}{start_row}:{col_letter}{end_data_row})"
+        cell = ws.cell(row=total_row_idx, column=c_idx, value=formula)
+        cell.font = font_bold
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        if c_idx in [4, 7]:
+            cell.fill = fill_accent
+        else:
+            cell.fill = fill_total
+
+    ws.cell(row=total_row_idx, column=8, value=f"Akumulasi Tahun Pelajaran {tahun_ajaran}").font = font_subtitle
+    ws.cell(row=total_row_idx, column=8).alignment = Alignment(horizontal="left", vertical="center")
+
+    for c_idx in range(1, 9):
+        ws.cell(row=total_row_idx, column=c_idx).border = double_bottom_border
+    ws.row_dimensions[total_row_idx].height = 24
+
+    recap_start_row = total_row_idx + 3
+    ws.cell(row=recap_start_row, column=1, value="REKAP TOTAL KOMPONEN TAHUNAN").font = font_bold
+    ws.merge_cells(start_row=recap_start_row, start_column=1, end_row=recap_start_row, end_column=3)
+
+    recap_headers = ["Komponen Analisis", "Jumlah Total", "Satuan"]
+    for i, h in enumerate(recap_headers, 1):
+        cell = ws.cell(row=recap_start_row+1, column=i, value=h)
+        cell.font = font_header
+        cell.fill = fill_header
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin_border
+    ws.row_dimensions[recap_start_row+1].height = 24
+
+    recap_items = [
+        ("Total Minggu Kalender", f"=B{total_row_idx}", "Minggu"),
+        ("Total Minggu Tidak Efektif", f"=C{total_row_idx}", "Minggu"),
+        ("Total Minggu Efektif Belajar", f"=D{total_row_idx}", "Minggu"),
+        ("Total Hari Sekolah", f"=E{total_row_idx}", "Hari"),
+        ("Total Hari Tidak Efektif", f"=F{total_row_idx}", "Hari"),
+        ("Total Hari Efektif Belajar", f"=G{total_row_idx}", "Hari")
+    ]
+
+    for idx, item in enumerate(recap_items):
+        r_idx = recap_start_row + 2 + idx
+        ws.cell(row=r_idx, column=1, value=item[0]).font = font_normal
+        c_val = ws.cell(row=r_idx, column=2, value=item[1])
+        c_val.font = font_bold
+        c_val.alignment = Alignment(horizontal="center", vertical="center")
+        
+        c_unit = ws.cell(row=r_idx, column=3, value=item[2])
+        c_unit.font = font_normal
+        c_unit.alignment = Alignment(horizontal="center", vertical="center")
+        
+        if "Efektif Belajar" in item[0]:
+            c_val.fill = fill_accent
+        elif idx % 2 == 1:
+            for c in range(1, 4):
+                ws.cell(row=r_idx, column=c).fill = fill_zebra
+                
+        for c in range(1, 4):
+            ws.cell(row=r_idx, column=c).border = thin_border
+        ws.row_dimensions[r_idx].height = 20
+
+    col_widths = {'A': 22, 'B': 24, 'C': 22, 'D': 24, 'E': 20, 'F': 20, 'G': 20, 'H': 55}
+    for col, width in col_widths.items():
+        ws.column_dimensions[col].width = width
+
+    out_filename = f"Analisis_HEM_{jenjang.replace(' / ', '_').replace('/', '_')}_{tahun_ajaran.replace('/', '_')}.xlsx"
+    wb.save(out_filename)
+
+    hem_summary_text = f"Analisis Hari Efektif Mengajar (HEM) | Satuan Pendidikan: {sekolah['nama_sekolah']} | Guru Pengampu: {guru_nama} (NIP. {guru_nip}) | Jenjang: {jenjang} | Tahun: {tahun_ajaran} | Sistem: {sistem_hari} | Total Efektif: {tot_minggu_efektif} Minggu / {tot_hari_efektif} Hari"
+    
+    hem_cache_key = f"HEM | {jenjang} | {tahun_ajaran} | {sistem_hari}"
+    cached_hem = db.execute("SELECT id FROM arsip WHERE jenis_modul = ? AND topik = ? LIMIT 1", ("Analisis Hari Efektif Mengajar (HEM)", hem_cache_key)).fetchone()
+    if not cached_hem:
+        db.execute("INSERT INTO arsip (user_id, jenis_modul, topik, konten) VALUES (?, ?, ?, ?)",
+                   (session['user_id'], "Analisis Hari Efektif Mengajar (HEM)", hem_cache_key, hem_summary_text))
+    else:
+        db.execute("UPDATE arsip SET konten = ?, created_at = CURRENT_TIMESTAMP WHERE jenis_modul = ? AND topik = ?",
+                   (hem_summary_text, "Analisis Hari Efektif Mengajar (HEM)", hem_cache_key))
+    
+    db.execute("INSERT INTO log_aktivitas (user_id, aktivitas) VALUES (?, ?)",
+               (session['user_id'], f"Analisis HEM ({jenjang} - {tahun_ajaran}) berhasil dianalisis & disimpan ke Arsip"))
+    db.commit()
+
+    custom_tabs = db.execute("SELECT * FROM custom_modul").fetchall()
+    flash('Analisis Hari Efektif Mengajar (HEM) berhasil dijalankan!', 'success')
+    return render_template('generator.html', custom_tabs=custom_tabs, preview_data=data, totals=totals, req_jenjang=jenjang, req_tahun=tahun_ajaran, req_sistem=sistem_hari, download_filename=out_filename, active_tab='Analisis Hari Efektif Mengajar (HEM)')
+
+@app.route('/download-file-hem')
+def download_file_hem():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    filename = request.args.get('filename', 'Analisis_HEM.xlsx')
+    if os.path.exists(filename):
+        return send_file(filename, as_attachment=True)
+    flash('File tidak ditemukan.', 'danger')
+    return redirect(url_for('generator'))
+
+@app.route('/arsip')
+def arsip():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    db = get_db()
+    if session['role'] in ['superadmin', 'admin']:
+        list_arsip = db.execute("SELECT a.*, u.nama_lengkap, u.nip FROM arsip a JOIN users u ON a.user_id = u.id ORDER BY a.id DESC").fetchall()
+    else:
+        list_arsip = db.execute("SELECT a.*, u.nama_lengkap, u.nip FROM arsip a JOIN users u ON a.user_id = u.id WHERE a.user_id = ? ORDER BY a.id DESC", (session['user_id'],)).fetchall()
+    return render_template('arsip.html', list_arsip=list_arsip)
+
+@app.route('/arsip/lihat/<int:arsip_id>')
+def lihat_arsip(arsip_id):
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    db = get_db()
+    item = db.execute("SELECT a.*, u.nama_lengkap, u.nip FROM arsip a JOIN users u ON a.user_id = u.id WHERE a.id = ?", (arsip_id,)).fetchone()
+    sekolah = db.execute("SELECT * FROM sekolah LIMIT 1").fetchone()
+    if not item:
+        flash('Dokumen arsip tidak ditemukan.', 'danger')
+        return redirect(url_for('arsip'))
+    
+    preview_data = None
+    totals = None
+    if "HEM" in item['jenis_modul'] or "Hari Efektif" in item['jenis_modul']:
+        preview_data = [
+            ["Juli 2025", 4, 3, 1, 22, 16, 6, "Masa Pengenalan Lingkungan Sekolah (MPLS) & Awal Tahun"],
+            ["Agustus 2025", 5, 1, 4, 21, 1, 20, "17 Agustus (HUT Kemerdekaan RI)"],
+            ["September 2025", 4, 0, 4, 22, 1, 21, "Peringatan Maulid Nabi SAW"],
+            ["Oktober 2025", 4, 0, 4, 23, 0, 23, "Pembelajaran Reguler Efektif"],
+            ["November 2025", 4, 0, 4, 21, 0, 21, "Pembelajaran Reguler Efektif"],
+            ["Desember 2025", 4, 3, 1, 22, 12, 10, "STS/SAS Semester Ganjil, Libur Semester"],
+            ["Januari 2026", 5, 1, 4, 22, 1, 21, "Awal Semester Genap"],
+            ["Februari 2026", 4, 0, 4, 20, 1, 19, "Isra Mikraj / Tahun Baru Imlek"],
+            ["Maret 2026", 4, 2, 2, 21, 7, 14, "Libur Awal Ramadan & Hari Raya Idulfitri"],
+            ["April 2026", 4, 1, 3, 22, 4, 18, "Libur Hari Raya Idulfitri / Cuti Bersama"],
+            ["Mei 2026", 4, 1, 3, 20, 2, 18, "Hari Buruh, Kenaikan Isa Almasih, Waisak"],
+            ["Juni 2026", 4, 3, 1, 22, 15, 7, "Asesmen Sumatif Akhir Tahun (ASAT) & Libur Kenaikan Kelas"]
+        ]
+        tot_minggu_kal = sum(row[1] for row in preview_data)
+        tot_minggu_taktif = sum(row[2] for row in preview_data)
+        tot_minggu_efektif = sum(row[3] for row in preview_data)
+        tot_hari_sekolah = sum(row[4] for row in preview_data)
+        tot_hari_taktif = sum(row[5] for row in preview_data)
+        tot_hari_efektif = sum(row[6] for row in preview_data)
+        totals = {
+            "total_minggu_kalender": tot_minggu_kal,
+            "total_minggu_taktif": tot_minggu_taktif,
+            "total_minggu_efektif": tot_minggu_efektif,
+            "total_hari_sekolah": tot_hari_sekolah,
+            "total_hari_taktif": tot_hari_taktif,
+            "total_hari_efektif": tot_hari_efektif
+        }
+
+    return render_template('lihat_arsip.html', item=item, sekolah=sekolah, preview_data=preview_data, totals=totals)
+
+@app.route('/pengaturan')
+def pengaturan():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    db = get_db()
+    users = db.execute("SELECT * FROM users ORDER BY id DESC").fetchall()
+    moduls = db.execute("SELECT * FROM custom_modul").fetchall()
+    notif = db.execute("SELECT * FROM notifikasi ORDER BY id DESC LIMIT 1").fetchone()
+    return render_template('pengaturan.html', users=users, moduls=moduls, notif=notif)
+
+@app.route('/konfirmasi-user/<int:user_id>')
+def konfirmasi_user(user_id):
+    if session.get('role') not in ['superadmin', 'admin']:
+        return redirect(url_for('dashboard'))
+    db = get_db()
+    db.execute("UPDATE users SET status = 'active' WHERE id = ?", (user_id,))
+    db.commit()
+    flash('Akun pengguna berhasil dikonfirmasi dan diaktifkan!', 'success')
+    return redirect(url_for('pengaturan'))
+
+@app.route('/ganti-password', methods=['POST'])
+def ganti_password():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    password_lama = request.form['password_lama']
+    password_baru = request.form['password_baru']
+    konfirmasi = request.form['konfirmasi_password']
+    
+    if password_baru != konfirmasi:
+        flash('Password baru dan konfirmasi password tidak cocok!', 'danger')
+        return redirect(url_for('pengaturan'))
+    
+    db = get_db()
+    user = db.execute("SELECT * FROM users WHERE id = ?", (session['user_id'],)).fetchone()
+    if user['password'] != password_lama:
+        flash('Password lama salah!', 'danger')
+        return redirect(url_for('pengaturan'))
+    
+    db.execute("UPDATE users SET password = ? WHERE id = ?", (password_baru, session['user_id']))
+    db.commit()
+    flash('Password berhasil diubah!', 'success')
+    return redirect(url_for('pengaturan'))
+
+@app.route('/tambah-user', methods=['POST'])
+def tambah_user():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    nama = request.form['nama_lengkap']
+    nip = request.form.get('nip', '-')
+    username = request.form['username']
+    password = request.form['password']
+    role = request.form['role']
+    
+    db = get_db()
+    try:
+        db.execute("INSERT INTO users (username, password, nama_lengkap, nip, role, status) VALUES (?, ?, ?, ?, ?, 'active')",
+                   (username, password, nama, nip, role))
+        db.commit()
+        flash(f'Pengguna {nama} berhasil ditambahkan dan langsung aktif!', 'success')
+    except sqlite3.IntegrityError:
+        flash('Username sudah terdaftar!', 'danger')
+    return redirect(url_for('pengaturan'))
+
+@app.route('/edit-user/<int:user_id>', methods=['POST'])
+def edit_user(user_id):
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    nama = request.form['nama_lengkap']
+    nip = request.form.get('nip', '-')
+    username = request.form['username']
+    password = request.form.get('password', '')
+    role = request.form['role']
+    
+    db = get_db()
+    if password and password.strip() != '':
+        db.execute("UPDATE users SET nama_lengkap = ?, nip = ?, username = ?, password = ?, role = ? WHERE id = ?",
+                   (nama, nip, username, password, role, user_id))
+    else:
+        db.execute("UPDATE users SET nama_lengkap = ?, nip = ?, username = ?, role = ? WHERE id = ?",
+                   (nama, nip, username, role, user_id))
+    db.commit()
+    flash('Data pengguna berhasil diperbarui!', 'success')
+    return redirect(url_for('pengaturan'))
+
+@app.route('/hapus-user/<int:user_id>')
+def hapus_user(user_id):
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    db = get_db()
+    user = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
+    if user and user['username'] == 'superadmin':
+        flash('Akun superadmin utama tidak dapat dihapus!', 'danger')
+        return redirect(url_for('pengaturan'))
+    db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    db.commit()
+    flash('Pengguna berhasil dihapus!', 'success')
+    return redirect(url_for('pengaturan'))
+
+@app.route('/update-notifikasi', methods=['POST'])
+def update_notifikasi():
+    if session.get('role') != 'superadmin':
+        return redirect(url_for('dashboard'))
+    pesan = request.form['pesan']
+    is_active = 1 if 'is_active' in request.form else 0
+    db = get_db()
+    db.execute("DELETE FROM notifikasi")
+    db.execute("INSERT INTO notifikasi (pesan, is_active) VALUES (?, ?)", (pesan, is_active))
+    db.commit()
+    flash('Pengaturan notifikasi login berhasil diperbarui!', 'success')
+    return redirect(url_for('pengaturan'))
+
+@app.route('/tambah-modul-admin', methods=['POST'])
+def tambah_modul_admin():
+    if session.get('role') != 'superadmin':
+        return redirect(url_for('dashboard'))
+    db = get_db()
+    nama_modul = request.form['nama_modul']
+    kode_slug = request.form['kode_slug']
+    file = request.files.get('template_file')
+    if file and file.filename != '':
+        path = os.path.join(UPLOAD_FOLDER, file.filename)
+        file.save(path)
+        db.execute("INSERT INTO custom_modul (nama_modul, kode_slug, template_path) VALUES (?, ?, ?)",
+                   (nama_modul, kode_slug, path))
+        db.commit()
+        flash('Modul baru berhasil ditambahkan!', 'success')
+    return redirect(url_for('pengaturan'))
+
+@app.route('/hapus-modul/<int:modul_id>')
+def hapus_modul(modul_id):
+    if session.get('role') != 'superadmin':
+        return redirect(url_for('dashboard'))
+    db = get_db()
+    db.execute("DELETE FROM custom_modul WHERE id = ?", (modul_id,))
+    db.commit()
+    flash('Modul berhasil dihapus!', 'success')
+    return redirect(url_for('pengaturan'))
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    flash('Anda telah keluar.', 'info')
+    return redirect(url_for('login'))
+
+
+
+@app.route('/download-word-arsip/<int:arsip_id>')
+def download_word_arsip(arsip_id):
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    db = get_db()
+    item = db.execute("SELECT * FROM arsip WHERE id = ?", (arsip_id,)).fetchone()
+    if not item:
+        flash('Dokumen arsip tidak ditemukan.', 'danger')
+        return redirect(url_for('arsip'))
+    
+    if "HEM" in item['jenis_modul'] or "Hari Efektif" in item['jenis_modul']:
+        flash('Analisis HEM tidak tersedia dalam format Word.', 'warning')
+        return redirect(url_for('lihat_arsip', arsip_id=arsip_id))
+    
+    try:
+        from docx import Document
+        from docx.shared import Inches, Pt, RGBColor
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        
+        doc = Document()
+        for section in doc.sections:
+            section.top_margin = Inches(1)
+            section.bottom_margin = Inches(1)
+            section.left_margin = Inches(1)
+            section.right_margin = Inches(1)
+            
+        title = doc.add_paragraph()
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run_title = title.add_run(f"{item['jenis_modul']}\nTOPIK: {item['topik']}")
+        run_title.bold = True
+        run_title.font.size = Pt(14)
+        run_title.font.color.rgb = RGBColor(31, 78, 121)
+        
+        doc.add_paragraph()
+        
+        for line in item['konten'].split('\n'):
+            doc.add_paragraph(line)
+            
+        safe_jenis = "".join([c if c.isalnum() else "_" for c in item['jenis_modul']])
+        filename = f"Dokumen_{safe_jenis}_{item['id']}.docx"
+        filepath = os.path.abspath(os.path.join(UPLOAD_FOLDER, filename))
+        doc.save(filepath)
+        
+        return send_file(
+            filepath,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        )
+    except Exception as e:
+        flash(f'Gagal membuat dokumen Word: {str(e)}', 'danger')
+        return redirect(url_for('lihat_arsip', arsip_id=arsip_id))
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
